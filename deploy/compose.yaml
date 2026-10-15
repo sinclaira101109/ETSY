@@ -1,0 +1,31 @@
+services:
+  app:
+    build: ..
+    restart: unless-stopped
+    environment:
+      APP_USER: ${APP_USER:?Set APP_USER}
+      APP_PASSWORD: ${APP_PASSWORD:?Set APP_PASSWORD}
+    ports:
+      - "127.0.0.1:8000:8000"
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+  proxy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?Set APP_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    mem_limit: 128m
+volumes:
+  caddy_data:
+  caddy_config:
