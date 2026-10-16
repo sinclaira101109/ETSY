@@ -2,6 +2,8 @@ from pathlib import Path
 import io
 import os
 import secrets
+import html
+import json
 from fastapi import Depends
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import pandas as pd
@@ -37,14 +39,14 @@ def analyze(data: bytes):
     if df.empty:
         raise HTTPException(422, "CSV 没有商品记录")
     cols = {key: locate(df.columns, names) for key, names in REQUIRED.items()}
-    missing = [key for key, value in cols.items() if value is None]
+    missing = [key for key, value in cols.items() if value is None and key in ("title", "tags")]
     if missing:
-        raise HTTPException(422, "缺少必需字段：" + ", ".join(missing) + "。支持 Etsy 导出字段或对应英文别名。")
+        raise HTTPException(422, "缺少必需字段：" + ", ".join(missing) + "。请至少提供商品标题和标签列。")
     out = pd.DataFrame()
     out["title"] = df[cols["title"]].fillna("").astype(str)
     out["tags"] = df[cols["tags"]].fillna("").astype(str)
-    out["views"] = pd.to_numeric(df[cols["views"]], errors="coerce").fillna(0)
-    out["orders"] = pd.to_numeric(df[cols["orders"]], errors="coerce").fillna(0)
+    out["views"] = pd.to_numeric(df[cols["views"]], errors="coerce").fillna(0) if cols["views"] else 0
+    out["orders"] = pd.to_numeric(df[cols["orders"]], errors="coerce").fillna(0) if cols["orders"] else 0
     out["conversion_rate"] = (out["orders"] / out["views"].replace(0, pd.NA) * 100).fillna(0).round(2)
     out["seo_score"] = (out["title"].str.len().between(30, 140).astype(int) * 35
         + out["tags"].str.split(r"[,|;]").str.len().clip(upper=13).div(13).mul(35)
@@ -66,4 +68,6 @@ async def upload(file: UploadFile = File(...)):
     data = await file.read(10 * 1024 * 1024 + 1)
     if len(data) > 10 * 1024 * 1024:
         raise HTTPException(413, "文件不能超过 10 MB")
-    return analyze(data)
+    result = analyze(data)
+    rows = "".join(f"<tr><td>{html.escape(str(r['title']))}</td><td>{r['seo_score']}</td><td>{r['conversion_rate']}%</td><td>{html.escape(str(r['priority']))}</td></tr>" for r in result["listings"])
+    return HTMLResponse(f"""<h1>ETSY 分析报告</h1><p>商品数：{result['rows']}；平均 SEO 分数：{result['avg_seo_score']}；平均转化率：{result['avg_conversion_rate']}%</p><p>问题分类：{html.escape(json.dumps(result['issues'], ensure_ascii=False))}</p><table border='1' cellpadding='6'><tr><th>商品标题</th><th>SEO 分数</th><th>转化率</th><th>建议优先级</th></tr>{rows}</table><p><a href='/'>返回继续上传</a></p>""")
