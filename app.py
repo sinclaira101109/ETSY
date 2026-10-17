@@ -232,8 +232,22 @@ def analyze_many(files, shop_url=""):
     if not files:
         raise HTTPException(422, "请至少选择一个 CSV 文件。")
     results = []
+    auxiliary = []
     for source_name, payload in files:
-        result = analyze(payload)
+        try:
+            result = analyze(payload)
+        except HTTPException as exc:
+            # A traffic/keyword export may not contain title/tags. Keep it visible
+            # in the report instead of pretending it was a product table.
+            if exc.status_code == 422 and "title" in str(exc.detail) and "tags" in str(exc.detail):
+                try:
+                    frame = pd.read_csv(io.BytesIO(payload), dtype=str, nrows=0, encoding="utf-8-sig")
+                    auxiliary.append({"file": source_name, "columns": [str(c) for c in frame.columns], "reason": str(exc.detail),
+                                      "next_step": "请提供可与商品关联的 title 或 listing_id；本次只记录文件，未把它用于商品结论。"})
+                    continue
+                except Exception:
+                    pass
+            raise
         for listing in result["listings"]:
             listing["source_file"] = source_name
         results.append(result)
@@ -258,7 +272,8 @@ def analyze_many(files, shop_url=""):
              "店铺网址仅作为报告上下文，未抓取登录页面或私有数据。搜索量、竞争度和真实排名仍需官方导出或合规的关键词资料。")
     return {"version": REPORT_VERSION, "rows": len(listings), "listings": listings, "bottlenecks": bottlenecks,
             "generated_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
-            "field_map": fields, "shop_url": shop_url.strip(), "sources": [name for name, _ in files], "scope": scope}
+            "field_map": fields, "shop_url": shop_url.strip(), "sources": [name for name, _ in files],
+            "auxiliary": auxiliary, "scope": scope}
 
 
 def esc(value):
@@ -299,6 +314,8 @@ def render_report(result):
     tasks = []
     for f in result["bottlenecks"][:5]:
         tasks.append(f"<tr><td>{esc(f['area'])}（{f['count']} 个商品）</td><td>{esc(f['actions'][0])}</td><td>{esc(f['verification'])}</td></tr>")
+    auxiliary_html = "".join(f"<li><b>{esc(item['file'])}</b>：未进入逐商品诊断。识别列：{esc(', '.join(item['columns']) or '无')}。{esc(item['next_step'])}</li>" for item in result.get('auxiliary', []))
+    auxiliary_section = f"<section><h2>未合并的辅助文件</h2><p>这些文件已被识别，但没有足够的商品关联键，系统没有把它们硬套到商品上。</p><ul>{auxiliary_html}</ul></section>" if auxiliary_html else ""
     return page("ETSY 经营诊断报告", f"<h1>这次上传揭示了哪些问题？</h1><p>生成时间：{esc(result['generated_at'])}（北京时间） · 商品 {result['rows']} 个</p>"
         f"<p class='notice'>{esc(result['scope'])} 下列是待处理的证据与核查任务，不能等同于已证实的店铺销售卡点。</p>"
         "<button onclick='window.print()'>打印 / 保存 PDF</button> <a href='/'>返回上传</a>"
@@ -308,6 +325,7 @@ def render_report(result):
         "<section><h2>平台机制、内部规则和未知项</h2><p>内容相关性、买家理解及交易体验是核查方向；本工具没有还原 Etsy 排名算法。标题词数、描述关键字和覆盖率都是内部筛查，不是官方权重或处罚线。</p>"
         "<p>标题与 TAG 的词面一致不等于语义一致或高搜索量。无 eRank/搜索数据时不输出虚构竞争度、搜索度或热门长尾词。没有图片原件时不评价首图美观度；没有渠道和历史数据时不归因流量下降。</p>"
         "<p>官方核对入口：<a href='https://www.etsy.com/seller-handbook/article/375461474487' target='_blank' rel='noopener'>Etsy：How Etsy Search Works</a>、<a href='https://www.etsy.com/legal/creativity/' target='_blank' rel='noopener'>Etsy Creativity Standards</a>。本次未能实时读取官方页面，不能称为已按最新算法校验；以官方最新原文及编辑器为准。</p></section>"
+        + auxiliary_section +
         f"<section><h2>数据识别记录</h2><p>店铺上下文：{esc(result.get('shop_url') or '未提供')}</p><p>本次文件：{esc('、'.join(result.get('sources', [])) or '单个上传文件')}</p><table><tr><th>文件</th><th>识别到的字段</th></tr>{field_rows}</table><p>section 不当成 category，materials 不当成 attributes，quantity_sold 不当成 orders，views 不当成 visits。</p></section>"
         + "".join(listings_html))
 

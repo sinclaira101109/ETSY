@@ -129,11 +129,12 @@ class HTTPTests(unittest.TestCase):
         self.assertIn('HoryalfTowelFlowers', rendered)
         self.assertIn('逐 TAG 核对记录', rendered)
 
-    def test_bad_csv_returns_readable_error(self):
-        with self.assertRaises(urllib.error.HTTPError) as err:
-            self.upload(b'wrong\nvalue\n')
-        self.assertEqual(err.exception.code, 422)
-        self.assertIn('返回上传页面', err.exception.read().decode())
+    def test_auxiliary_csv_is_retained_with_reason(self):
+        with self.upload(b'keyword,search_volume\ntowel gift,100\n') as response:
+            body = response.read().decode()
+            self.assertEqual(response.status, 200)
+            self.assertIn('未合并的辅助文件', body)
+            self.assertIn('title 或 listing_id', body)
 
 
 if __name__ == '__main__':
