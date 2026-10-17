@@ -3,3 +3,7 @@
 __pycache__
 .env
 *.zip
+**/.env
+deploy/backups/
+deploy/runtime.log
+tests/

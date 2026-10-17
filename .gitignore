@@ -4,3 +4,5 @@ __pycache__/
 
 .env
 *.pem
+deploy/backups/
+deploy/runtime.log
