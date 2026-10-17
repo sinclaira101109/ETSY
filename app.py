@@ -40,6 +40,8 @@ MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_TOTAL_BYTES = 200 * 1024 * 1024
 MAX_ZIP_MEMBERS = 100
 MAX_ZIP_UNCOMPRESSED = 150 * 1024 * 1024
+MAX_ROWS = 200_000
+MAX_DISPLAY_ROWS = 500
 
 FIELD_ALIASES = {
     "title": ["title", "name", "listing_title", "listing name"],
@@ -216,8 +218,8 @@ def analyze(data: bytes):
         raise HTTPException(400, "CSV 无法读取。请使用 UTF-8 编码的逗号分隔文件。")
     if df.empty:
         raise HTTPException(422, "CSV 没有商品记录")
-    if len(df) > 1000:
-        raise HTTPException(422, "单次最多分析 1000 条商品，请拆分文件。")
+    if len(df) > MAX_ROWS:
+        raise HTTPException(422, "单次最多分析 200000 条商品，请拆分文件。")
     cols = {key: locate(df.columns, names) for key, names in FIELD_ALIASES.items()}
     if not cols["title"] or not cols["tags"]:
         raise HTTPException(422, "请提供 title 和 tags 列；流量列可选。")
@@ -232,7 +234,7 @@ def analyze(data: bytes):
                 groups[f["code"]]["examples"].append(listing["title"])
     severity = {"高": 0, "中": 1, "低": 2}
     bottlenecks = sorted(groups.values(), key=lambda f: (severity[f["severity"]], -f["count"]))
-    return {"version": REPORT_VERSION, "rows": len(listings), "listings": listings, "bottlenecks": bottlenecks,
+    return {"version": REPORT_VERSION, "rows": len(listings), "listings": listings, "display_rows": min(len(listings), MAX_DISPLAY_ROWS), "bottlenecks": bottlenecks,
             "generated_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
             "field_map": {LABELS[k]: v for k, v in cols.items()},
             "scope": "仅分析这次上传的商品快照；没有自动访问店铺、Etsy 搜索或 eRank。不能从单期内容资料确定实际流量损失或销售趋势。"}
@@ -392,7 +394,7 @@ def render_report(result):
     else:
         field_rows = "".join(f"<tr><td>{esc(k)}</td><td>{esc(v) if v else '未提供，结论受限'}</td></tr>" for k, v in result["field_map"].items())
     listings_html = []
-    for listing in result["listings"]:
+    for listing in result["listings"][:MAX_DISPLAY_ROWS]:
         findings_html = []
         for f in listing["findings"]:
             actions = "".join(f"<li>{esc(a)}</li>" for a in f["actions"])
@@ -418,7 +420,8 @@ def render_report(result):
     documents = result.get("documents", [])
     document_rows = "".join(f"<tr><td>{esc(d['file'])}</td><td>{esc(d.get('format', ''))}</td><td>{esc(d.get('status', ''))}</td><td>{esc('；'.join(d.get('notes', [])))}</td><td>{esc((d.get('text') or '')[:500])}</td></tr>" for d in documents)
     document_section = f"<section><h2>非表格资料读取情况</h2><p>这些资料只用于参考，不会被当成流量或订单数字。</p><table><tr><th>文件</th><th>格式</th><th>状态</th><th>读取说明</th><th>文字摘要（最多 500 字）</th></tr>{document_rows}</table></section>" if documents else ""
-    return page("ETSY 经营诊断报告", f"<h1>这次上传揭示了哪些问题？</h1><p>生成时间：{esc(result['generated_at'])}（北京时间） · 商品 {result['rows']} 个</p>"
+    display_note = f"网页展示前 {result.get('display_rows', result['rows'])} 条，全部 {result['rows']} 条已纳入汇总诊断。" if result['rows'] > MAX_DISPLAY_ROWS else f"全部 {result['rows']} 条已展示。"
+    return page("ETSY 经营诊断报告", f"<h1>这次上传揭示了哪些问题？</h1><p>生成时间：{esc(result['generated_at'])}（北京时间） · 商品 {result['rows']} 个。{esc(display_note)}</p>"
         f"<p class='notice'>{esc(result['scope'])} 下列是待处理的证据与核查任务，不能等同于已证实的店铺销售卡点。</p>"
         "<button onclick='window.print()'>打印 / 保存 PDF</button> <a href='/'>返回上传</a>"
         f"<section><h2>先看这五项：主要阻碍与证据边界</h2><ol>{summary}</ol></section>"
