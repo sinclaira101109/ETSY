@@ -35,7 +35,7 @@ def authenticate(credentials: HTTPBasicCredentials = Depends(security)):
 
 app = FastAPI(title="ETSY CSV 店铺分析", version=REPORT_VERSION, dependencies=[Depends(authenticate)])
 
-ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".pdf", ".docx", ".txt", ".md", ".png", ".jpg", ".jpeg", ".webp", ".zip"}
+ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls", ".pdf", ".docx", ".txt", ".md", ".png", ".jpg", ".jpeg", ".webp", ".zip"}
 MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_TOTAL_BYTES = 200 * 1024 * 1024
 MAX_ZIP_MEMBERS = 100
@@ -276,7 +276,7 @@ def ingest_upload(name, data):
     payloads, documents = [], []
     if ext == ".csv":
         payloads.append((name, data))
-    elif ext == ".xlsx":
+    elif ext in {".xlsx", ".xls"}:
         try:
             sheets = pd.read_excel(io.BytesIO(data), sheet_name=None, dtype=str)
             for sheet, frame in sheets.items():
@@ -284,9 +284,9 @@ def ingest_upload(name, data):
                     continue
                 payloads.append((f"{name}::{sheet}", frame.to_csv(index=False).encode("utf-8-sig")))
             if not payloads:
-                documents.append({"file": name, "format": "xlsx", "status": "空工作簿", "text": "", "notes": ["没有可读工作表"]})
+                documents.append({"file": name, "format": ext[1:], "status": "空工作簿", "text": "", "notes": ["没有可读工作表"]})
         except Exception as exc:
-            documents.append({"file": name, "format": "xlsx", "status": "读取受限", "text": "", "notes": [f"Excel 解析失败：{type(exc).__name__}"]})
+            documents.append({"file": name, "format": ext[1:], "status": "读取受限", "text": "", "notes": [f"Excel 解析失败：{type(exc).__name__}"]})
     elif ext == ".zip":
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as archive:
@@ -304,7 +304,7 @@ def ingest_upload(name, data):
                         documents.append({"file": f"{name}::{inner}", "format": inner_ext.lstrip("."), "status": "已跳过", "text": "", "notes": ["压缩包内格式未启用解析"]})
                         continue
                     inner_data = archive.read(member)
-                    if inner_ext in {".csv", ".xlsx"}:
+                    if inner_ext in {".csv", ".xlsx", ".xls"}:
                         inner_payloads, inner_docs = ingest_upload(f"{name}::{inner}", inner_data)
                         payloads.extend(inner_payloads); documents.extend(inner_docs)
                     else:
@@ -443,7 +443,7 @@ def index():
         "<p>必需：title、tags。可选：description、category、attributes、materials、image_count、status、views、visits、orders、period_start、period_end。缺失字段显示未知，不伪装为 0 或未设置。</p>"
         "<p>可以同时上传商品资料、Etsy 流量、订单汇总、关键词资料、PDF、Word、Excel、图片和压缩包；表格进入结构化分析，文档和图片会显示读取情况。文件仅用于本次分析，不会保存到应用磁盘。</p>"
         "<p class='notice'>上传通过临时文件/内存解析，应用不建立文件档案或保存报告。请去掉买家个人信息；正式使用前须配置 HTTPS。当前不连接 Etsy/eRank 或 COS，不提供自动日报。</p>"
-        "<form action='/analyze' method='post' enctype='multipart/form-data'><label>店铺网址（仅作为报告上下文）：<input type='url' name='shop_url' size='60' placeholder='https://www.etsy.com/shop/HoryalfTowelFlowers'></label><br><br><input type='file' name='files' accept='.csv,.xlsx,.pdf,.docx,.txt,.md,.png,.jpg,.jpeg,.webp,.zip' multiple required><button>生成多文件详细报告</button></form><p>单文件最大 50 MB、单次最多 20 个文件、总大小最多 200 MB。报告可以通过浏览器打印保存 PDF。</p>")
+        "<form action='/analyze' method='post' enctype='multipart/form-data'><label>店铺网址（仅作为报告上下文）：<input type='url' name='shop_url' size='60' placeholder='https://www.etsy.com/shop/HoryalfTowelFlowers'></label><br><br><input type='file' name='files' accept='.csv,.xlsx,.xls,.pdf,.docx,.txt,.md,.png,.jpg,.jpeg,.webp,.zip' multiple required><button>生成多文件详细报告</button></form><p>单文件最大 50 MB、单次最多 20 个文件、总大小最多 200 MB。报告可以通过浏览器打印保存 PDF。</p>")
 
 
 @app.post("/analyze", response_class=HTMLResponse)
