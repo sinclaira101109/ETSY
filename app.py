@@ -443,15 +443,15 @@ def index():
         "<p>必需：title、tags。可选：description、category、attributes、materials、image_count、status、views、visits、orders、period_start、period_end。缺失字段显示未知，不伪装为 0 或未设置。</p>"
         "<p>可以同时上传商品资料、Etsy 流量、订单汇总、关键词资料、PDF、Word、Excel、图片和压缩包；表格进入结构化分析，文档和图片会显示读取情况。文件仅用于本次分析，不会保存到应用磁盘。</p>"
         "<p class='notice'>上传通过临时文件/内存解析，应用不建立文件档案或保存报告。请去掉买家个人信息；正式使用前须配置 HTTPS。当前不连接 Etsy/eRank 或 COS，不提供自动日报。</p>"
-        "<form action='/analyze' method='post' enctype='multipart/form-data'><label>店铺网址（仅作为报告上下文）：<input type='url' name='shop_url' size='60' placeholder='https://www.etsy.com/shop/HoryalfTowelFlowers'></label><br><br><input type='file' name='files' accept='.csv,.xlsx,.xls,.pdf,.docx,.txt,.md,.png,.jpg,.jpeg,.webp,.zip' multiple required><button>生成多文件详细报告</button></form><p>单文件最大 50 MB、单次最多 20 个文件、总大小最多 200 MB。报告可以通过浏览器打印保存 PDF。</p>")
+        "<form action='/analyze' method='post' enctype='multipart/form-data'><label>店铺网址（仅作为报告上下文）：<input type='url' name='shop_url' size='60' placeholder='https://www.etsy.com/shop/HoryalfTowelFlowers'></label><br><br><input type='file' name='files' accept='.csv,.xlsx,.xls,.pdf,.docx,.txt,.md,.png,.jpg,.jpeg,.webp,.zip' multiple required><button>生成多文件详细报告</button></form><p>单文件最大 50 MB、单次最多 50 个文件、总大小最多 200 MB。报告可以通过浏览器打印保存 PDF。</p>")
 
 
 @app.post("/analyze", response_class=HTMLResponse)
 async def upload(files: list[UploadFile] = File(...), shop_url: str = Form("")):
     if shop_url and not shop_url.startswith("https://www.etsy.com/shop/"):
         raise HTTPException(422, "店铺网址请使用 https://www.etsy.com/shop/ 开头的公开店铺地址。")
-    if len(files) > 20:
-        raise HTTPException(413, "单次最多上传 20 个 CSV 文件。")
+    if len(files) > 50:
+        raise HTTPException(413, "单次最多上传 50 个文件。")
     payloads, documents, total_bytes = [], [], 0
     try:
         for file in files:
