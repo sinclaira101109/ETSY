@@ -5,16 +5,21 @@ import math
 import secrets
 import html
 import json
+import zipfile
+import mimetypes
 from collections import Counter
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+from pypdf import PdfReader
+from docx import Document
+from PIL import Image
 from fastapi import Depends, FastAPI, File, UploadFile, HTTPException, Request, Form
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import HTMLResponse
 
-REPORT_VERSION = "0.4.0"
+REPORT_VERSION = "0.5.0"
 
 security = HTTPBasic()
 
@@ -29,6 +34,12 @@ def authenticate(credentials: HTTPBasicCredentials = Depends(security)):
         raise HTTPException(401, "用户名或密码错误", headers={"WWW-Authenticate": "Basic"})
 
 app = FastAPI(title="ETSY CSV 店铺分析", version=REPORT_VERSION, dependencies=[Depends(authenticate)])
+
+ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".pdf", ".docx", ".txt", ".md", ".png", ".jpg", ".jpeg", ".webp", ".zip"}
+MAX_FILE_BYTES = 50 * 1024 * 1024
+MAX_TOTAL_BYTES = 200 * 1024 * 1024
+MAX_ZIP_MEMBERS = 100
+MAX_ZIP_UNCOMPRESSED = 150 * 1024 * 1024
 
 FIELD_ALIASES = {
     "title": ["title", "name", "listing_title", "listing name"],
@@ -227,6 +238,86 @@ def analyze(data: bytes):
             "scope": "仅分析这次上传的商品快照；没有自动访问店铺、Etsy 搜索或 eRank。不能从单期内容资料确定实际流量损失或销售趋势。"}
 
 
+def extract_document(name, data):
+    """Extract safe, bounded reference text/metadata; it is never treated as listing metrics."""
+    ext = os.path.splitext(name.lower())[1]
+    item = {"file": name, "format": ext.lstrip("."), "status": "已读取", "text": "", "notes": []}
+    try:
+        if ext == ".pdf":
+            reader = PdfReader(io.BytesIO(data))
+            chunks = [(page.extract_text() or "") for page in reader.pages[:50]]
+            item["text"] = "\n".join(chunks)[:30000]
+            item["notes"].append(f"读取 {len(reader.pages)} 页中的前 {min(len(reader.pages), 50)} 页文字")
+        elif ext == ".docx":
+            doc = Document(io.BytesIO(data))
+            item["text"] = "\n".join(p.text for p in doc.paragraphs)[:30000]
+            item["notes"].append(f"读取 {len(doc.paragraphs)} 个段落")
+        elif ext in {".txt", ".md"}:
+            item["text"] = data.decode("utf-8-sig", errors="replace")[:30000]
+        elif ext in {".png", ".jpg", ".jpeg", ".webp"}:
+            with Image.open(io.BytesIO(data)) as image:
+                item["notes"].append(f"图片尺寸 {image.width}×{image.height}，格式 {image.format or ext[1:].upper()}")
+                item["image_width"], item["image_height"] = image.width, image.height
+                item["text"] = "图片未做 OCR；需要人工核对首图、比例、包装和使用场景。"
+        else:
+            item["status"] = "已读取文件信息"
+            item["notes"].append("该格式不进入文字解析")
+    except Exception as exc:
+        item["status"] = "读取受限"
+        item["notes"].append(f"解析失败：{type(exc).__name__}；未使用其内容生成结论")
+    return item
+
+
+def ingest_upload(name, data):
+    """Return product CSV payloads and safe reference-document records."""
+    ext = os.path.splitext(name.lower())[1]
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(415, f"暂不支持文件类型：{name}。支持 CSV、XLSX、PDF、DOCX、TXT、Markdown、PNG/JPG/WEBP、ZIP。")
+    payloads, documents = [], []
+    if ext == ".csv":
+        payloads.append((name, data))
+    elif ext == ".xlsx":
+        try:
+            sheets = pd.read_excel(io.BytesIO(data), sheet_name=None, dtype=str)
+            for sheet, frame in sheets.items():
+                if frame.empty and not len(frame.columns):
+                    continue
+                payloads.append((f"{name}::{sheet}", frame.to_csv(index=False).encode("utf-8-sig")))
+            if not payloads:
+                documents.append({"file": name, "format": "xlsx", "status": "空工作簿", "text": "", "notes": ["没有可读工作表"]})
+        except Exception as exc:
+            documents.append({"file": name, "format": "xlsx", "status": "读取受限", "text": "", "notes": [f"Excel 解析失败：{type(exc).__name__}"]})
+    elif ext == ".zip":
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                members = [m for m in archive.infolist() if not m.is_dir()]
+                total = sum(m.file_size for m in members)
+                if len(members) > MAX_ZIP_MEMBERS or total > MAX_ZIP_UNCOMPRESSED:
+                    raise HTTPException(413, f"压缩包内容超过安全限制：最多 {MAX_ZIP_MEMBERS} 个文件、解压总大小 {MAX_ZIP_UNCOMPRESSED // 1024 // 1024} MB。")
+                for member in members:
+                    inner = member.filename.replace("\\", "/")
+                    if inner.startswith("/") or ".." in inner.split("/"):
+                        documents.append({"file": f"{name}::{inner}", "format": "zip", "status": "已跳过", "text": "", "notes": ["检测到不安全路径"]})
+                        continue
+                    inner_ext = os.path.splitext(inner.lower())[1]
+                    if inner_ext not in ALLOWED_EXTENSIONS - {".zip"}:
+                        documents.append({"file": f"{name}::{inner}", "format": inner_ext.lstrip("."), "status": "已跳过", "text": "", "notes": ["压缩包内格式未启用解析"]})
+                        continue
+                    inner_data = archive.read(member)
+                    if inner_ext in {".csv", ".xlsx"}:
+                        inner_payloads, inner_docs = ingest_upload(f"{name}::{inner}", inner_data)
+                        payloads.extend(inner_payloads); documents.extend(inner_docs)
+                    else:
+                        documents.append(extract_document(f"{name}::{inner}", inner_data))
+        except HTTPException:
+            raise
+        except zipfile.BadZipFile:
+            raise HTTPException(400, f"压缩包无法读取：{name}")
+    else:
+        documents.append(extract_document(name, data))
+    return payloads, documents
+
+
 def analyze_many(files, shop_url=""):
     """Analyze independent exports together without pretending that unlike files are one metric table."""
     if not files:
@@ -276,6 +367,14 @@ def analyze_many(files, shop_url=""):
             "auxiliary": auxiliary, "scope": scope}
 
 
+def reference_only_report(documents, shop_url=""):
+    return {"version": REPORT_VERSION, "rows": 0, "listings": [], "bottlenecks": [],
+            "generated_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+            "field_map": {}, "shop_url": shop_url.strip(), "sources": [], "auxiliary": [],
+            "documents": documents,
+            "scope": "本次只有参考资料，没有识别到可用于逐商品诊断的 CSV/XLSX 表格；没有生成 SEO、流量或转化结论。"}
+
+
 def esc(value):
     return html.escape(str(value))
 
@@ -316,6 +415,9 @@ def render_report(result):
         tasks.append(f"<tr><td>{esc(f['area'])}（{f['count']} 个商品）</td><td>{esc(f['actions'][0])}</td><td>{esc(f['verification'])}</td></tr>")
     auxiliary_html = "".join(f"<li><b>{esc(item['file'])}</b>：未进入逐商品诊断。识别列：{esc(', '.join(item['columns']) or '无')}。{esc(item['next_step'])}</li>" for item in result.get('auxiliary', []))
     auxiliary_section = f"<section><h2>未合并的辅助文件</h2><p>这些文件已被识别，但没有足够的商品关联键，系统没有把它们硬套到商品上。</p><ul>{auxiliary_html}</ul></section>" if auxiliary_html else ""
+    documents = result.get("documents", [])
+    document_rows = "".join(f"<tr><td>{esc(d['file'])}</td><td>{esc(d.get('format', ''))}</td><td>{esc(d.get('status', ''))}</td><td>{esc('；'.join(d.get('notes', [])))}</td><td>{esc((d.get('text') or '')[:500])}</td></tr>" for d in documents)
+    document_section = f"<section><h2>非表格资料读取情况</h2><p>这些资料只用于参考，不会被当成流量或订单数字。</p><table><tr><th>文件</th><th>格式</th><th>状态</th><th>读取说明</th><th>文字摘要（最多 500 字）</th></tr>{document_rows}</table></section>" if documents else ""
     return page("ETSY 经营诊断报告", f"<h1>这次上传揭示了哪些问题？</h1><p>生成时间：{esc(result['generated_at'])}（北京时间） · 商品 {result['rows']} 个</p>"
         f"<p class='notice'>{esc(result['scope'])} 下列是待处理的证据与核查任务，不能等同于已证实的店铺销售卡点。</p>"
         "<button onclick='window.print()'>打印 / 保存 PDF</button> <a href='/'>返回上传</a>"
@@ -325,7 +427,7 @@ def render_report(result):
         "<section><h2>平台机制、内部规则和未知项</h2><p>内容相关性、买家理解及交易体验是核查方向；本工具没有还原 Etsy 排名算法。标题词数、描述关键字和覆盖率都是内部筛查，不是官方权重或处罚线。</p>"
         "<p>标题与 TAG 的词面一致不等于语义一致或高搜索量。无 eRank/搜索数据时不输出虚构竞争度、搜索度或热门长尾词。没有图片原件时不评价首图美观度；没有渠道和历史数据时不归因流量下降。</p>"
         "<p>官方核对入口：<a href='https://www.etsy.com/seller-handbook/article/375461474487' target='_blank' rel='noopener'>Etsy：How Etsy Search Works</a>、<a href='https://www.etsy.com/legal/creativity/' target='_blank' rel='noopener'>Etsy Creativity Standards</a>。本次未能实时读取官方页面，不能称为已按最新算法校验；以官方最新原文及编辑器为准。</p></section>"
-        + auxiliary_section +
+        + auxiliary_section + document_section +
         f"<section><h2>数据识别记录</h2><p>店铺上下文：{esc(result.get('shop_url') or '未提供')}</p><p>本次文件：{esc('、'.join(result.get('sources', [])) or '单个上传文件')}</p><table><tr><th>文件</th><th>识别到的字段</th></tr>{field_rows}</table><p>section 不当成 category，materials 不当成 attributes，quantity_sold 不当成 orders，views 不当成 visits。</p></section>"
         + "".join(listings_html))
 
@@ -339,9 +441,9 @@ async def readable_error(request: Request, exc: HTTPException):
 def index():
     return page("ETSY CSV 经营诊断", "<h1>把商品资料变成具体执行清单</h1><p>一次选择多个 CSV，报告会保留每一行的来源文件，并逐商品展示：证据 → 原因假设 → 优化理由 → 动作 → 验收与复查。</p>"
         "<p>必需：title、tags。可选：description、category、attributes、materials、image_count、status、views、visits、orders、period_start、period_end。缺失字段显示未知，不伪装为 0 或未设置。</p>"
-        "<p>可以同时上传商品资料、Etsy 流量、订单汇总和关键词资料；只有能识别 title/tags 的商品表会进入逐商品诊断，其他格式会显示具体原因。文件仅用于本次分析，不会保存到应用磁盘。</p>"
+        "<p>可以同时上传商品资料、Etsy 流量、订单汇总、关键词资料、PDF、Word、Excel、图片和压缩包；表格进入结构化分析，文档和图片会显示读取情况。文件仅用于本次分析，不会保存到应用磁盘。</p>"
         "<p class='notice'>上传通过临时文件/内存解析，应用不建立文件档案或保存报告。请去掉买家个人信息；正式使用前须配置 HTTPS。当前不连接 Etsy/eRank 或 COS，不提供自动日报。</p>"
-        "<form action='/analyze' method='post' enctype='multipart/form-data'><label>店铺网址（仅作为报告上下文）：<input type='url' name='shop_url' size='60' placeholder='https://www.etsy.com/shop/HoryalfTowelFlowers'></label><br><br><input type='file' name='files' accept='.csv' multiple required><button>生成多文件详细报告</button></form><p>UTF-8 CSV，单文件最大 10 MB、单次最多 20 个文件、每个文件最多 1000 行。报告可以通过浏览器打印保存 PDF。</p>")
+        "<form action='/analyze' method='post' enctype='multipart/form-data'><label>店铺网址（仅作为报告上下文）：<input type='url' name='shop_url' size='60' placeholder='https://www.etsy.com/shop/HoryalfTowelFlowers'></label><br><br><input type='file' name='files' accept='.csv,.xlsx,.pdf,.docx,.txt,.md,.png,.jpg,.jpeg,.webp,.zip' multiple required><button>生成多文件详细报告</button></form><p>单文件最大 50 MB、单次最多 20 个文件、总大小最多 200 MB。报告可以通过浏览器打印保存 PDF。</p>")
 
 
 @app.post("/analyze", response_class=HTMLResponse)
@@ -350,16 +452,20 @@ async def upload(files: list[UploadFile] = File(...), shop_url: str = Form("")):
         raise HTTPException(422, "店铺网址请使用 https://www.etsy.com/shop/ 开头的公开店铺地址。")
     if len(files) > 20:
         raise HTTPException(413, "单次最多上传 20 个 CSV 文件。")
-    payloads = []
+    payloads, documents, total_bytes = [], [], 0
     try:
         for file in files:
-            if not (file.filename or "").lower().endswith(".csv"):
-                raise HTTPException(415, f"只支持 CSV 文件：{file.filename or '未命名文件'}")
-            data = await file.read(10 * 1024 * 1024 + 1)
-            if len(data) > 10 * 1024 * 1024:
-                raise HTTPException(413, f"文件不能超过 10 MB：{file.filename}")
-            payloads.append((file.filename or "未命名.csv", data))
-        return HTMLResponse(render_report(analyze_many(payloads, shop_url)))
+            data = await file.read(MAX_FILE_BYTES + 1)
+            total_bytes += len(data)
+            if len(data) > MAX_FILE_BYTES:
+                raise HTTPException(413, f"文件不能超过 50 MB：{file.filename}")
+            if total_bytes > MAX_TOTAL_BYTES:
+                raise HTTPException(413, "本次上传总大小不能超过 200 MB。")
+            new_payloads, new_documents = ingest_upload(file.filename or "未命名文件", data)
+            payloads.extend(new_payloads); documents.extend(new_documents)
+        result = analyze_many(payloads, shop_url) if payloads else reference_only_report(documents, shop_url)
+        result.setdefault("documents", []).extend(documents)
+        return HTMLResponse(render_report(result))
     finally:
         for file in files:
             await file.close()

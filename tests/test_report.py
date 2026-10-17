@@ -7,10 +7,11 @@ import socket
 import subprocess
 import time
 import unittest
+import pandas as pd
 import urllib.error
 import urllib.request
 
-from app import analyze, render_report
+from app import analyze, render_report, ingest_upload, reference_only_report
 
 
 def sample(**values):
@@ -35,6 +36,25 @@ class ReportTests(unittest.TestCase):
         self.assertNotIn('0.0%', rendered)
         self.assertNotIn('平均 SEO 分数', rendered)
         json.dumps(result, allow_nan=False)
+
+    def test_non_csv_formats_are_ingested_without_being_metrics(self):
+        from zipfile import ZipFile
+        pdf_payload, pdf_docs = ingest_upload('notes.txt', '产品买点和包装说明'.encode('utf-8'))
+        self.assertEqual(pdf_payload, [])
+        self.assertIn('产品买点', pdf_docs[0]['text'])
+        xlsx = io.BytesIO()
+        with pd.ExcelWriter(xlsx, engine='openpyxl') as writer:
+            pd.DataFrame({'title': ['A towel bouquet'], 'tags': ['towel gift']}).to_excel(writer, index=False)
+        payloads, docs = ingest_upload('products.xlsx', xlsx.getvalue())
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(docs, [])
+        archive = io.BytesIO()
+        with ZipFile(archive, 'w') as z:
+            z.writestr('products.csv', 'title,tags\nA towel bouquet,towel gift\n')
+            z.writestr('../unsafe.csv', 'title,tags\nBad,bad\n')
+        payloads, docs = ingest_upload('bundle.zip', archive.getvalue())
+        self.assertEqual(len(payloads), 1)
+        self.assertTrue(any('不安全路径' in note for doc in docs for note in doc['notes']))
 
     def test_zero_orders_with_declared_period_differs_from_unknown(self):
         listing = analyze(sample(visits='100', orders='0', period_start='2026-10-01', period_end='2026-10-07'))['listings'][0]
@@ -112,7 +132,7 @@ class HTTPTests(unittest.TestCase):
             self.assertIn('观察证据', body)
             self.assertIn('执行动作', body)
             self.assertIn('逐 TAG 核对记录', body)
-            self.assertIn('0.4.0', body)
+            self.assertIn('0.5.0', body)
 
     def test_multiple_files_and_shop_context_are_reported(self):
         data_a = sample(title="A towel bouquet", tags="towel gift,rose gift")
