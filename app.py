@@ -10,11 +10,11 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from fastapi import Depends, FastAPI, File, UploadFile, HTTPException, Request
+from fastapi import Depends, FastAPI, File, UploadFile, HTTPException, Request, Form
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import HTMLResponse
 
-REPORT_VERSION = "0.3.0"
+REPORT_VERSION = "0.4.0"
 
 security = HTTPBasic()
 
@@ -28,7 +28,7 @@ def authenticate(credentials: HTTPBasicCredentials = Depends(security)):
     if not (valid_user and valid_password):
         raise HTTPException(401, "用户名或密码错误", headers={"WWW-Authenticate": "Basic"})
 
-app = FastAPI(title="ETSY CSV 店铺分析 MVP", version="0.3.0", dependencies=[Depends(authenticate)])
+app = FastAPI(title="ETSY CSV 店铺分析", version=REPORT_VERSION, dependencies=[Depends(authenticate)])
 
 FIELD_ALIASES = {
     "title": ["title", "name", "listing_title", "listing name"],
@@ -227,6 +227,40 @@ def analyze(data: bytes):
             "scope": "仅分析这次上传的商品快照；没有自动访问店铺、Etsy 搜索或 eRank。不能从单期内容资料确定实际流量损失或销售趋势。"}
 
 
+def analyze_many(files, shop_url=""):
+    """Analyze independent exports together without pretending that unlike files are one metric table."""
+    if not files:
+        raise HTTPException(422, "请至少选择一个 CSV 文件。")
+    results = []
+    for source_name, payload in files:
+        result = analyze(payload)
+        for listing in result["listings"]:
+            listing["source_file"] = source_name
+        results.append(result)
+    listings = [listing for result in results for listing in result["listings"]]
+    for number, listing in enumerate(listings, 1):
+        listing["id"] = number
+    groups = {}
+    for result in results:
+        for item in result["bottlenecks"]:
+            if item["code"] not in groups:
+                groups[item["code"]] = {**item, "count": 0, "examples": []}
+            groups[item["code"]]["count"] += item["count"]
+            for example in item["examples"]:
+                if example not in groups[item["code"]]["examples"] and len(groups[item["code"]]["examples"]) < 3:
+                    groups[item["code"]]["examples"].append(example)
+    severity = {"高": 0, "中": 1, "低": 2}
+    bottlenecks = sorted(groups.values(), key=lambda f: (severity[f["severity"]], -f["count"]))
+    fields = {}
+    for (source_name, _), result in zip(files, results):
+        fields[source_name] = result["field_map"]
+    scope = ("本次合并分析了 " + ", ".join(name for name, _ in files) + "；每一行保留来源文件。"
+             "店铺网址仅作为报告上下文，未抓取登录页面或私有数据。搜索量、竞争度和真实排名仍需官方导出或合规的关键词资料。")
+    return {"version": REPORT_VERSION, "rows": len(listings), "listings": listings, "bottlenecks": bottlenecks,
+            "generated_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+            "field_map": fields, "shop_url": shop_url.strip(), "sources": [name for name, _ in files], "scope": scope}
+
+
 def esc(value):
     return html.escape(str(value))
 
@@ -239,7 +273,10 @@ def page(title, body):
 
 def render_report(result):
     summary = "".join(f"<li><b>{esc(f['area'])}</b> · {f['count']}/{result['rows']} 个商品 · {esc(f['status'])}<br>{esc(f['interpretation'])}<br><small>示例：{esc('；'.join(f['examples']))}</small></li>" for f in result["bottlenecks"][:5])
-    field_rows = "".join(f"<tr><td>{esc(k)}</td><td>{esc(v) if v else '未提供，结论受限'}</td></tr>" for k, v in result["field_map"].items())
+    if result.get("sources"):
+        field_rows = "".join(f"<tr><td>{esc(source)}</td><td>{esc(json.dumps(fields, ensure_ascii=False))}</td></tr>" for source, fields in result["field_map"].items())
+    else:
+        field_rows = "".join(f"<tr><td>{esc(k)}</td><td>{esc(v) if v else '未提供，结论受限'}</td></tr>" for k, v in result["field_map"].items())
     listings_html = []
     for listing in result["listings"]:
         findings_html = []
@@ -256,7 +293,7 @@ def render_report(result):
             verdict = "与标题有词面交集；仍需核实是否准确表达实物" if shared else "没有英文实词交集；可能是场景词/同义词，不可直接删除"
             tag_audit.append(f"<tr><td>{esc(tag)}</td><td>{len(tag)} 字符</td><td>{esc(', '.join(shared) or '无')}</td><td>{esc(verdict)}</td><td>搜索度 / 竞争度未知；需有日期、市场和来源的数据</td></tr>")
         tag_table = "<h3>逐 TAG 核对记录</h3><table><tr><th>原 TAG</th><th>长度</th><th>标题实词交集</th><th>解释与处理原则</th><th>需求证据</th></tr>" + "".join(tag_audit) + "</table>"
-        listings_html.append(f"<article id='listing-{listing['id']}'><h2>{listing['id']}. {esc(listing['title'])}</h2><p>{esc(listing['priority'])} · 状态：{esc(listing['status'])}</p>"
+        listings_html.append(f"<article id='listing-{listing['id']}'><h2>{listing['id']}. {esc(listing['title'])}</h2><p>{esc(listing['priority'])} · 状态：{esc(listing['status'])} · 来源文件：{esc(listing.get('source_file', '本次上传'))}</p>"
             f"<p>转化率：{esc(rate)}。不再给出混合了未知数据的 SEO 总分。</p><p>当前 TAG：{esc(' / '.join(listing['tags']))}</p>" + "".join(findings_html) + tag_table +
             f"<h3>可编辑文案骨架（需人工核实，不能直接当作定稿）</h3><p>标题草稿：</p><pre>{esc(listing['title_draft'])}</pre><p>描述草稿：</p><pre>{esc(listing['description_template'])}</pre></article>")
     tasks = []
@@ -271,7 +308,7 @@ def render_report(result):
         "<section><h2>平台机制、内部规则和未知项</h2><p>内容相关性、买家理解及交易体验是核查方向；本工具没有还原 Etsy 排名算法。标题词数、描述关键字和覆盖率都是内部筛查，不是官方权重或处罚线。</p>"
         "<p>标题与 TAG 的词面一致不等于语义一致或高搜索量。无 eRank/搜索数据时不输出虚构竞争度、搜索度或热门长尾词。没有图片原件时不评价首图美观度；没有渠道和历史数据时不归因流量下降。</p>"
         "<p>官方核对入口：<a href='https://www.etsy.com/seller-handbook/article/375461474487' target='_blank' rel='noopener'>Etsy：How Etsy Search Works</a>、<a href='https://www.etsy.com/legal/creativity/' target='_blank' rel='noopener'>Etsy Creativity Standards</a>。本次未能实时读取官方页面，不能称为已按最新算法校验；以官方最新原文及编辑器为准。</p></section>"
-        f"<section><h2>数据识别记录</h2><table><tr><th>分析字段</th><th>来源列</th></tr>{field_rows}</table><p>section 不当成 category，materials 不当成 attributes，quantity_sold 不当成 orders，views 不当成 visits。</p></section>"
+        f"<section><h2>数据识别记录</h2><p>店铺上下文：{esc(result.get('shop_url') or '未提供')}</p><p>本次文件：{esc('、'.join(result.get('sources', [])) or '单个上传文件')}</p><table><tr><th>文件</th><th>识别到的字段</th></tr>{field_rows}</table><p>section 不当成 category，materials 不当成 attributes，quantity_sold 不当成 orders，views 不当成 visits。</p></section>"
         + "".join(listings_html))
 
 
@@ -282,20 +319,29 @@ async def readable_error(request: Request, exc: HTTPException):
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return page("ETSY CSV 经营诊断", "<h1>把商品资料变成具体执行清单</h1><p>上传后逐商品展示：证据 → 原因假设 → 优化理由 → 动作 → 验收与复查。</p>"
+    return page("ETSY CSV 经营诊断", "<h1>把商品资料变成具体执行清单</h1><p>一次选择多个 CSV，报告会保留每一行的来源文件，并逐商品展示：证据 → 原因假设 → 优化理由 → 动作 → 验收与复查。</p>"
         "<p>必需：title、tags。可选：description、category、attributes、materials、image_count、status、views、visits、orders、period_start、period_end。缺失字段显示未知，不伪装为 0 或未设置。</p>"
+        "<p>可以同时上传商品资料、Etsy 流量、订单汇总和关键词资料；只有能识别 title/tags 的商品表会进入逐商品诊断，其他格式会显示具体原因。文件仅用于本次分析，不会保存到应用磁盘。</p>"
         "<p class='notice'>上传通过临时文件/内存解析，应用不建立文件档案或保存报告。请去掉买家个人信息；正式使用前须配置 HTTPS。当前不连接 Etsy/eRank 或 COS，不提供自动日报。</p>"
-        "<form action='/analyze' method='post' enctype='multipart/form-data'><input type='file' name='file' accept='.csv' required><button>生成详细报告</button></form><p>UTF-8 CSV，最大 10 MB / 1000 商品。报告可以通过浏览器打印保存 PDF。</p>")
+        "<form action='/analyze' method='post' enctype='multipart/form-data'><label>店铺网址（仅作为报告上下文）：<input type='url' name='shop_url' size='60' placeholder='https://www.etsy.com/shop/HoryalfTowelFlowers'></label><br><br><input type='file' name='files' accept='.csv' multiple required><button>生成多文件详细报告</button></form><p>UTF-8 CSV，单文件最大 10 MB、单次最多 20 个文件、每个文件最多 1000 行。报告可以通过浏览器打印保存 PDF。</p>")
 
 
 @app.post("/analyze", response_class=HTMLResponse)
-async def upload(file: UploadFile = File(...)):
+async def upload(files: list[UploadFile] = File(...), shop_url: str = Form("")):
+    if shop_url and not shop_url.startswith("https://www.etsy.com/shop/"):
+        raise HTTPException(422, "店铺网址请使用 https://www.etsy.com/shop/ 开头的公开店铺地址。")
+    if len(files) > 20:
+        raise HTTPException(413, "单次最多上传 20 个 CSV 文件。")
+    payloads = []
     try:
-        if not (file.filename or "").lower().endswith(".csv"):
-            raise HTTPException(415, "只支持 CSV 文件")
-        data = await file.read(10 * 1024 * 1024 + 1)
-        if len(data) > 10 * 1024 * 1024:
-            raise HTTPException(413, "文件不能超过 10 MB")
-        return HTMLResponse(render_report(analyze(data)))
+        for file in files:
+            if not (file.filename or "").lower().endswith(".csv"):
+                raise HTTPException(415, f"只支持 CSV 文件：{file.filename or '未命名文件'}")
+            data = await file.read(10 * 1024 * 1024 + 1)
+            if len(data) > 10 * 1024 * 1024:
+                raise HTTPException(413, f"文件不能超过 10 MB：{file.filename}")
+            payloads.append((file.filename or "未命名.csv", data))
+        return HTMLResponse(render_report(analyze_many(payloads, shop_url)))
     finally:
-        await file.close()
+        for file in files:
+            await file.close()

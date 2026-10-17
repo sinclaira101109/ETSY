@@ -100,7 +100,7 @@ class HTTPTests(unittest.TestCase):
         cls.proc.wait(timeout=10)
 
     def upload(self, data):
-        body = b'--test-boundary\r\nContent-Disposition: form-data; name="file"; filename="shop.csv"\r\nContent-Type: text/csv\r\n\r\n' + data + b'\r\n--test-boundary--\r\n'
+        body = b'--test-boundary\r\nContent-Disposition: form-data; name="files"; filename="shop.csv"\r\nContent-Type: text/csv\r\n\r\n' + data + b'\r\n--test-boundary--\r\n'
         request = urllib.request.Request(self.url + '/analyze', body, headers={'Authorization': self.auth, 'Content-Type': 'multipart/form-data; boundary=test-boundary'})
         return urllib.request.urlopen(request)
 
@@ -112,7 +112,22 @@ class HTTPTests(unittest.TestCase):
             self.assertIn('观察证据', body)
             self.assertIn('执行动作', body)
             self.assertIn('逐 TAG 核对记录', body)
-            self.assertIn('0.3.0', body)
+            self.assertIn('0.4.0', body)
+
+    def test_multiple_files_and_shop_context_are_reported(self):
+        data_a = sample(title="A towel bouquet", tags="towel gift,rose gift")
+        data_b = sample(title="A second towel gift", tags="towel gift,housewarming")
+        body = b''
+        for name, data in ((b"products.csv", data_a), (b"traffic.csv", data_b)):
+            body += b"--test-boundary\r\nContent-Disposition: form-data; name=\"files\"; filename=\"" + name + b"\"\r\nContent-Type: text/csv\r\n\r\n" + data + b"\r\n"
+        body += b"--test-boundary\r\nContent-Disposition: form-data; name=\"shop_url\"\r\n\r\nhttps://www.etsy.com/shop/HoryalfTowelFlowers\r\n--test-boundary--\r\n"
+        request = urllib.request.Request(self.url + '/analyze', body, headers={'Authorization': self.auth, 'Content-Type': 'multipart/form-data; boundary=test-boundary'})
+        with urllib.request.urlopen(request) as response:
+            rendered = response.read().decode()
+        self.assertIn('products.csv', rendered)
+        self.assertIn('traffic.csv', rendered)
+        self.assertIn('HoryalfTowelFlowers', rendered)
+        self.assertIn('逐 TAG 核对记录', rendered)
 
     def test_bad_csv_returns_readable_error(self):
         with self.assertRaises(urllib.error.HTTPError) as err:
