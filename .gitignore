@@ -6,3 +6,10 @@ __pycache__/
 *.pem
 deploy/backups/
 deploy/runtime.log
+
+# Local-only B2B and product data
+data/inbox/
+output/
+leadpilot_desktop/*.csv
+leadpilot_desktop/*.xlsx
+leadpilot_desktop/*.env
