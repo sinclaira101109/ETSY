@@ -1,0 +1,48 @@
+project:
+  name: etsy-operations
+  mode: draft_and_review
+  timezone: Asia/Shanghai
+
+shops:
+  - name: HoryalfTowelFlowers
+    market: US
+    workflows:
+      - product_data_quality
+      - listing_seo_audit
+      - photo_audit
+      - b2b_prospecting_drafts
+
+  - name: MahjongHavenCrafts
+    market: US
+    workflows:
+      - product_data_quality
+      - listing_seo_audit
+      - photo_audit
+
+  - name: HoryalfFursuitPop
+    market: US
+    workflows:
+      - product_data_quality
+      - listing_seo_audit
+      - photo_audit
+
+execution:
+  schedule_enabled: false
+  publish_listings_automatically: false
+  send_emails_automatically: false
+  spend_lead_credits_automatically: false
+  change_prices_automatically: false
+  overwrite_source_files: false
+
+outputs:
+  root: output
+  dated_subfolders: true
+  include_source_references: true
+  flag_unknown_values: NEEDS_CONFIRMATION
+
+b2b:
+  initial_country: US
+  max_contacts_per_test_batch: 10
+  require_human_approval_before_send: true
+  respect_suppression_list: true
+  email_sequence_max_steps: 3
