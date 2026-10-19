@@ -34,3 +34,18 @@ Do a read-only inspection of the current repository and any files in data/inbox/
 Do not modify source data or connect to external accounts.
 Report the current structure, missing product facts, and the smallest safe first pilot.
 ```
+
+
+## Read-only operations pilot
+
+Install dependencies in the project environment, then run:
+
+```powershell
+py -m pip install -r requirements.txt
+New-Item -ItemType Directory -Force data\inbox
+# Put a copy of a product CSV/XLSX into data\inbox; do not commit confidential data.
+py ops_workflow.py --input data/inbox --output output --shop HoryalfTowelFlowers
+py -m unittest discover -s tests -v
+```
+
+The command creates a dated output folder containing `sku_audit.csv`, `buyer_segments.csv`, `outreach_drafts.md`, and `report.json`. It does not access Etsy, LeadPilot, or email accounts. It does not publish, send, or spend credits. See `docs/first-run.md`.
